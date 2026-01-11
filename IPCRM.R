@@ -159,16 +159,17 @@ IPCRM <- function(
   
   # summaries across trials
   dose.select <- numeric(J)   # final selected MTD counts
-  ntox        <- rep(0, J)    # total tox observations at each dose (NOTE: observations, not unique patients)
-  nobs        <- rep(0, J)    # total observations (dose-cycles) at each dose
+  ntox        <- rep(0, J)    # patient-level tox counts at each dose (count pt once per dose)
+  ntrted      <- rep(0, J)    # patient-level treated counts at each dose (count pt once per dose)
   nstop       <- 0            # early stopped trials
-  ntrted      <- rep(0, J)
+  
   # for debugging: store patient sequences for EACH trial (can be large!)
   patient_seq_by_trial <- vector("list", ntrial)
   
   t.start <- Sys.time()
   
   for(trial in 1:ntrial) {
+    
     # running observation-level data across entire trial
     y_all <- integer(0)  # toxicity outcomes per observation (cycle-dose)
     d_all <- integer(0)  # dose level per observation
@@ -182,7 +183,7 @@ IPCRM <- function(
     j_S_prev <- 1L   # previous cohort starting dose (initialize 1)
     stop_trial <- FALSE
     
-    # ---- Step 1: first cohort starts at dose 1 (paper Step 1) ----
+    # ---- Step 1: first cohort starts at dose 1 ----
     j_S_curr <- 1L
     
     for(coh in 1:ncohort) {
@@ -191,6 +192,7 @@ IPCRM <- function(
       if(coh > 1) {
         res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
         j_MTD <- res$MTD
+        
         if(j_MTD > j_H) {
           j_S_curr <- min(j_H + 1L, J)
         } else if(j_MTD < j_S_prev) {
@@ -199,12 +201,10 @@ IPCRM <- function(
           j_S_curr <- j_MTD
         }
       }
-
       
       j_S_prev <- j_S_curr
       
       # ---- Enroll COHORTSIZE new patients; all start at j_S_curr ----
-      # Register patients for debugging
       for(k in seq_len(COHORTSIZE)) {
         patient_id <- patient_id + 1L
         patient_seq[[patient_id]] <- list(
@@ -215,13 +215,13 @@ IPCRM <- function(
           stop   = NA_character_
         )
       }
-      # patient ids in this cohort (global IDs)
       pid <- (patient_id - COHORTSIZE + 1L):patient_id
       
       # Patient state variables within cohort
-      curr_dose    <- rep(j_S_curr, COHORTSIZE)
-      active       <- rep(TRUE,  COHORTSIZE)  # FALSE once toxicity occurs
-      ndoses_taken <- rep(1L,    COHORTSIZE)  # count of DIFFERENT doses taken so far (<=K)
+      curr_dose <- rep(j_S_curr, COHORTSIZE)
+      active    <- rep(TRUE,  COHORTSIZE)  # FALSE once patient stops
+      # count of DIFFERENT doses taken so far (unique-dose count)
+      ndoses_taken <- rep(1L, COHORTSIZE)
       
       # update highest tried dose
       j_H <- max(j_H, j_S_curr)
@@ -233,7 +233,17 @@ IPCRM <- function(
         if(!any(active)) break
         
         # stop if all active patients already reached K different doses
-        if(all(!active | (ndoses_taken >= K))) break
+        if(all(!active | (ndoses_taken >= K))) {
+          # mark those still active but reached maxK
+          idx_maxk <- which(active & ndoses_taken >= K)
+          if(length(idx_maxk) > 0) {
+            for(ii in idx_maxk) {
+              p_global <- pid[ii]
+              if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+            }
+          }
+          break
+        }
         
         # administer current cycle doses to active patients
         idx <- which(active)
@@ -244,7 +254,7 @@ IPCRM <- function(
         y_all <- c(y_all, y_cycle)
         d_all <- c(d_all, d_cycle)
         
-        # record patient-level sequences
+        # record patient-level sequences + toxicity stop
         for(m in seq_along(idx)) {
           p_global <- pid[idx[m]]
           patient_seq[[p_global]]$doses <- c(patient_seq[[p_global]]$doses, d_cycle[m])
@@ -255,13 +265,13 @@ IPCRM <- function(
           }
         }
         
-        # mark toxicity -> stop further treatment for that patient
+        # toxicity => stop further treatment for that patient
         active[idx[y_cycle == 1L]] <- FALSE
         
         # update highest tried dose based on administered cycle
         j_H <- max(j_H, max(d_cycle))
         
-        # update estimated MTD using all data (placeholder)
+        # update estimated MTD using all data
         res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
         j_MTD <- res$MTD
         
@@ -270,65 +280,61 @@ IPCRM <- function(
         if(length(idx2) == 0) break
         
         next_dose <- pmin(curr_dose[idx2] + 1L, J)
+        
+        # escalation availability in YOUR stated IPCRM stopping rule:
+        # - if cannot escalate, patient stops (NOT "stay and continue")
         can_escalate <- (next_dose <= j_MTD) & (curr_dose[idx2] < J)
         
-        # if can escalate, move up by 1 and increment number of different doses taken
-        if(any(can_escalate)) {
-          curr_dose[idx2[can_escalate]] <- next_dose[can_escalate]
-          ndoses_taken[idx2[can_escalate]] <- ndoses_taken[idx2[can_escalate]] + 1L
+        # patients who cannot escalate => stop due to "no IPE available"
+        if(any(!can_escalate)) {
+          idx_stop <- idx2[!can_escalate]
+          for(ii in idx_stop) {
+            p_global <- pid[ii]
+            if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
+          }
+          active[idx_stop] <- FALSE
         }
         
-        # if cannot escalate, stay at current dose and continue to next cycle
-      } # end cycles
-      # ---- Early termination rule (placeholder): Pr(pi1 > phi | data) > c_stop ----
-      # takes place after patient enroll
-      overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      if(overtox$stop == 1){
-        stop_trial = TRUE;
-        break
+        # those who can escalate: move up by 1 and increment number of different doses taken
+        if(any(can_escalate)) {
+          idx_up <- idx2[can_escalate]
+          curr_dose[idx_up] <- next_dose[can_escalate]
+          ndoses_taken[idx_up] <- ndoses_taken[idx_up] + 1L
+          j_H <- max(j_H, max(curr_dose[idx_up]))
         }
+        
+      } # end cycles within cohort
       
-      # mark maxK for patients who never tox and reached K doses
-      for(m in seq_len(COHORTSIZE)) {
-        p_global <- pid[m]
-        if(is.na(patient_seq[[p_global]]$stop)) {
-          if(length(patient_seq[[p_global]]$doses) >= K) {
-            patient_seq[[p_global]]$stop <- "maxK"
-          }
-        }
+      # ---- Early termination rule (trial-level): Pr(p1 > TARGET | data) > c_stop ----
+      overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+      if(isTRUE(overtox$stop == 1)) {
+        stop_trial <- TRUE
+        break
       }
       
     } # end cohorts
     
-    # finalize stop labels for any remaining NA
+    # finalize stop labels for any remaining NA (e.g., still active when trial ended)
     for(i in seq_along(patient_seq)) {
       if(is.na(patient_seq[[i]]$stop)) patient_seq[[i]]$stop <- "trial_end"
     }
     
-    # store debug sequences
     patient_seq_by_trial[[trial]] <- patient_seq
     
     if(stop_trial) {
       nstop <- nstop + 1
     } else {
-      # ---- Step 4: final MTD selection using all available data ----
       res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
       final_MTD <- res$MTD
       dose.select[final_MTD] <- dose.select[final_MTD] + 1
     }
     
-    # record summary stats per dose (observations across cycles, not unique patients)
-    # for(j in seq_len(J)) {
-    #   nobs[j] <- nobs[j] + sum(d_all == j)
-    #   ntox[j] <- ntox[j] + sum(y_all[d_all == j])
-    # }
     # -------------------------------
     # PATIENT-LEVEL summary updating
     # -------------------------------
     for(pid_i in seq_along(patient_seq)) {
       doses_i <- patient_seq[[pid_i]]$doses
       tox_i   <- patient_seq[[pid_i]]$tox
-      
       if(length(doses_i) == 0) next
       
       # patient treated at these dose levels (count once per dose)
@@ -337,28 +343,27 @@ IPCRM <- function(
       
       # patient had >=1 toxicity while at dose j (count once per dose)
       tox_doses <- unique(doses_i[tox_i == 1L])
-      if(length(tox_doses) > 0) {
-        ntox[tox_doses] <- ntox[tox_doses] + 1
-      }
+      if(length(tox_doses) > 0) ntox[tox_doses] <- ntox[tox_doses] + 1
     }
   } # end trials
   
   t.end <- Sys.time()
   
   cat("Selection probability (%): ", round(dose.select / ntrial * 100, 2), "\n")
-  cat("Avg # obs at each dose:     ", round(ntrted / ntrial, 3), "\n")
-  cat("Avg # tox at each dose:     ", round(ntox / ntrial, 3), "\n")
-  cat("Early stop rate (%):        ", round(nstop / ntrial * 100, 2), "\n")
+  cat("Avg # pts treated at dose: ", round(ntrted / ntrial, 3), "\n")
+  cat("Avg # pts tox at dose:     ", round(ntox / ntrial, 3), "\n")
+  cat("Early stop rate (%):       ", round(nstop / ntrial * 100, 2), "\n")
   print(t.end - t.start)
   
   invisible(list(
-    sel_pct = dose.select / ntrial,
-    avg_obs = ntrted / ntrial,
-    avg_tox = ntox / ntrial,
-    stop_pct = nstop / ntrial,
+    sel_pct   = dose.select / ntrial,
+    avg_trted = ntrted / ntrial,
+    avg_tox   = ntox / ntrial,
+    stop_pct  = nstop / ntrial,
     patient_seq_by_trial = patient_seq_by_trial
   ))
 }
+
 #mu_beta - mean of prior 
 backsol <- function(ske, mu_beta0, mu_beta1){
   dose = (log(ske/(1-ske)) - mu_beta0)/mu_beta1
@@ -373,7 +378,7 @@ res <- IPCRM(
               dose,
               COHORTSIZE = 3,
               ncohort = 3,
-              ntrial = 100,
+              ntrial = 2000,
               K = length(dose),
               c_stop = 0.96,
               seed = 6
