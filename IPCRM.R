@@ -162,7 +162,7 @@ IPCRM <- function(
   ntox        <- rep(0, J)    # total tox observations at each dose (NOTE: observations, not unique patients)
   nobs        <- rep(0, J)    # total observations (dose-cycles) at each dose
   nstop       <- 0            # early stopped trials
-  
+  ntrted      <- rep(0, J)
   # for debugging: store patient sequences for EACH trial (can be large!)
   patient_seq_by_trial <- vector("list", ntrial)
   
@@ -318,23 +318,42 @@ IPCRM <- function(
     }
     
     # record summary stats per dose (observations across cycles, not unique patients)
-    for(j in seq_len(J)) {
-      nobs[j] <- nobs[j] + sum(d_all == j)
-      ntox[j] <- ntox[j] + sum(y_all[d_all == j])
+    # for(j in seq_len(J)) {
+    #   nobs[j] <- nobs[j] + sum(d_all == j)
+    #   ntox[j] <- ntox[j] + sum(y_all[d_all == j])
+    # }
+    # -------------------------------
+    # PATIENT-LEVEL summary updating
+    # -------------------------------
+    for(pid_i in seq_along(patient_seq)) {
+      doses_i <- patient_seq[[pid_i]]$doses
+      tox_i   <- patient_seq[[pid_i]]$tox
+      
+      if(length(doses_i) == 0) next
+      
+      # patient treated at these dose levels (count once per dose)
+      dset <- unique(doses_i)
+      ntrted[dset] <- ntrted[dset] + 1
+      
+      # patient had >=1 toxicity while at dose j (count once per dose)
+      tox_doses <- unique(doses_i[tox_i == 1L])
+      if(length(tox_doses) > 0) {
+        ntox[tox_doses] <- ntox[tox_doses] + 1
+      }
     }
   } # end trials
   
   t.end <- Sys.time()
   
   cat("Selection probability (%): ", round(dose.select / ntrial * 100, 2), "\n")
-  cat("Avg # obs at each dose:     ", round(nobs / ntrial, 3), "\n")
+  cat("Avg # obs at each dose:     ", round(ntrted / ntrial, 3), "\n")
   cat("Avg # tox at each dose:     ", round(ntox / ntrial, 3), "\n")
   cat("Early stop rate (%):        ", round(nstop / ntrial * 100, 2), "\n")
   print(t.end - t.start)
   
   invisible(list(
     sel_pct = dose.select / ntrial,
-    avg_obs = nobs / ntrial,
+    avg_obs = ntrted / ntrial,
     avg_tox = ntox / ntrial,
     stop_pct = nstop / ntrial,
     patient_seq_by_trial = patient_seq_by_trial
@@ -348,14 +367,14 @@ ske1 = c(0.02, 0.12, 0.3, 0.5, 0.65)
 #backsolve for d_j
 dose = backsol(ske1, mu_beta0 = 3, mu_beta1 = 1)
 sce1 = c(0.05, 0.15, 0.3, 0.5, 0.8)
-IPCRM(
-    sce1,
-    TARGET = 0.3,
-    dose,
-    COHORTSIZE = 3,
-    ncohort = 3,
-    ntrial = 2000,
-    K = length(dose),
-    c_stop = 0.96,
-    seed = 6
+res <- IPCRM(
+              sce1,
+              TARGET = 0.3,
+              dose,
+              COHORTSIZE = 3,
+              ncohort = 3,
+              ntrial = 100,
+              K = length(dose),
+              c_stop = 0.96,
+              seed = 6
 )
