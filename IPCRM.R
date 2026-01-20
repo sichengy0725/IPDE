@@ -322,7 +322,7 @@ IPCRM <- function(
         # Escalation availability rule:
         # - must have a higher dose available (curr < J)
         # - and escalation must be allowed by the model (next_dose <= j_MTD)
-        can_escalate <- (curr_dose[idx2] < J) & (next_dose <= j_MTD)
+        can_escalate <- (curr_dose[idx2] < J) & (curr_dose[idx2] <= j_MTD)
         
         # If cannot escalate => end treatment (NO "stay")
         # if(any(!can_escalate)) {
