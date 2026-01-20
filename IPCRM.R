@@ -54,7 +54,7 @@ estimate_MTD <- function(y, d, p, TARGET, lambda, sigma, mu) {
   # cat('tox',posttox, '\n')
   diff = abs(posttox-TARGET);
   dose.best = min(which(diff==min(diff)))
-  return(list(dose.best = dose.best, posttox = posttox))
+  return(list(MTD = dose.best, posttox = posttox))
 }
 overtox_prob <- function(y, d, p, TARGET, lambda, sigma, mu) {
   q <- qlogis(TARGET)   # logit(phi)
