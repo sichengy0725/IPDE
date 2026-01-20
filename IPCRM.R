@@ -205,8 +205,8 @@ IPCRM <- function(
       if(coh > 1) {
         
         
-        # res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-        res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
+        res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+        # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
         j_MTD <- res$MTD
         cat("posttox=", paste(round(res$posttox,3), collapse=" "), " j_MTD=", j_MTD, "\n")
         if(j_MTD > j_H) {
@@ -241,7 +241,7 @@ IPCRM <- function(
       # count of DIFFERENT doses taken so far (unique-dose count)
       # ndoses_taken <- rep(1L, COHORTSIZE)
       # NEW: count cycles received (per patient)
-      ncycle <- rep(0L, COHORTSIZE)
+      # ncycle <- rep(0L, COHORTSIZE)
       
       # update highest tried dose
       j_H <- max(j_H, j_S_curr)
@@ -253,20 +253,21 @@ IPCRM <- function(
         if(!any(active)) break
         
         # stop if all active patients already reached K cycles
-        if(all(!active | (ncycle >= K))) {
-          idx_done <- which(active & ncycle >= K)
-          if(length(idx_done) > 0) {
-            for(ii in idx_done) {
-              p_global <- pid[ii]
-              if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
-            }
-            active[idx_done] <- FALSE
-          }
-          break
-        }
+        # if(all(!active | (ncycle >= K))) {
+        #   idx_done <- which(active & ncycle >= K)
+        #   if(length(idx_done) > 0) {
+        #     for(ii in idx_done) {
+        #       p_global <- pid[ii]
+        #       if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+        #     }
+        #     active[idx_done] <- FALSE
+        #   }
+        #   break
+        # }
         
         # administer current cycle doses to active patients
-        idx <- which(active & (ncycle < K))
+        # idx <- which(active & (ncycle < K))
+        idx <- which(active)
         if(length(idx) == 0) break
         # cat("d_cycle:", d_cycle, "\n")
         # cat("PI[d_cycle]:", PI[d_cycle], "\n")
@@ -278,7 +279,7 @@ IPCRM <- function(
         cat("PI[d_cycle]:", PI[d_cycle], "\n")
         cat("y_cycle:", y_cycle, "\n")
         # update cycle counters
-        ncycle[idx] <- ncycle[idx] + 1L
+        # ncycle[idx] <- ncycle[idx] + 1L
         
         # append to accumulated observation-level data
         y_all <- c(y_all, y_cycle)
@@ -304,26 +305,19 @@ IPCRM <- function(
         
         # update estimated MTD using all data
         
-        # res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-        res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
+        res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+        # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
         j_MTD <- res$MTD
         cat('y_all', y_all, '\n')
         cat('d_all', d_all, '\n')
         cat("intra posttox=", paste(round(res$posttox,3), collapse=" "), " j_MTD=", j_MTD, "\n")
         # decide next cycle dose for those still active and still have cycles left
-        idx2 <- which(active & (ncycle < K))
+        # idx2 <- which(active & (ncycle < K))
+        idx2 <- which(active)
         if(length(idx2) == 0) break
         
         next_dose <- pmin(curr_dose[idx2] + 1L, J)
-        
-        # IMPORTANT: if cannot escalate, STAY (do not stop)
-        # can_escalate <- (next_dose <= j_MTD) & (curr_dose[idx2] < J)
-        # 
-        # if(any(can_escalate)) {
-        #   idx_up <- idx2[can_escalate]
-        #   curr_dose[idx_up] <- curr_dose[idx_up] + 1L
-        #   j_H <- max(j_H, max(curr_dose[idx_up]))
-        # }
+
         
         # Escalation availability rule:
         # - must have a higher dose available (curr < J)
@@ -331,14 +325,14 @@ IPCRM <- function(
         can_escalate <- (curr_dose[idx2] < J) & (next_dose <= j_MTD)
         
         # If cannot escalate => end treatment (NO "stay")
-        if(any(!can_escalate)) {
-          idx_stop <- idx2[!can_escalate]
-          for(ii in idx_stop) {
-            p_global <- pid[ii]
-            if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
-          }
-          active[idx_stop] <- FALSE
-        }
+        # if(any(!can_escalate)) {
+        #   idx_stop <- idx2[!can_escalate]
+        #   for(ii in idx_stop) {
+        #     p_global <- pid[ii]
+        #     if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
+        #   }
+        #   active[idx_stop] <- FALSE
+        # }
         
         # If can escalate => move up by 1 for next cycle
         if(any(can_escalate)) {
@@ -349,14 +343,14 @@ IPCRM <- function(
         
         
         # after escalation attempt, immediately stop anyone who just reached K cycles
-        idx_done2 <- which(active & (ncycle >= K))
-        if(length(idx_done2) > 0) {
-          for(ii in idx_done2) {
-            p_global <- pid[ii]
-            if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
-          }
-          active[idx_done2] <- FALSE
-        }
+        # idx_done2 <- which(active & (ncycle >= K))
+        # if(length(idx_done2) > 0) {
+        #   for(ii in idx_done2) {
+        #     p_global <- pid[ii]
+        #     if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+        #   }
+        #   active[idx_done2] <- FALSE
+        # }
         
         
         cat('can escalation', can_escalate, '\n')
@@ -366,10 +360,10 @@ IPCRM <- function(
       
       
       # ---- Early termination rule (trial-level): Pr(p1 > TARGET | data) > c_stop ----
-      # overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      overtox = overtox_prob(y_all,d_all,dose, TARGET,lambda = 1, sigma = 0.5, mu = 3 )
-      # if(isTRUE(overtox$stop == 1)) {
-      if(overtox > c_stop){
+      overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+      # overtox = overtox_prob(y_all,d_all,p, TARGET,lambda = 1, sigma = 0.5, mu = 3 )
+      if(isTRUE(overtox$stop == 1)) {
+      #if(overtox > c_stop){
         stop_trial <- TRUE
         break
       }
@@ -386,8 +380,8 @@ IPCRM <- function(
     if(stop_trial) {
       nstop <- nstop + 1
     } else {
-      # res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
+      res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+      # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
       final_MTD = select_dose(res$posttox, d_all)
       # final_MTD <- res$MTD
       dose.select[final_MTD] <- dose.select[final_MTD] + 1
