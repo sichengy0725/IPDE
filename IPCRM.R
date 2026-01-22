@@ -83,9 +83,10 @@ overtox_prob <- function(y, d, p, TARGET, lambda, sigma, mu) {
   
   return(num/denom)
 }
-select_dose <- function(post_prob, dose_trt) {
+select_dose <- function(post_prob, dose_trt,TARGET) {
   treated <- sort(unique(dose_trt))
-  cand    <- treated[post_prob[treated] == max(post_prob[treated])]
+  diff <- abs(post_prob[treated] - TARGET)
+  cand    <- treated[diff[treated] == min(diff[treated])]
   min(cand)
 }
 
@@ -241,7 +242,7 @@ IPCRM <- function(
       # count of DIFFERENT doses taken so far (unique-dose count)
       # ndoses_taken <- rep(1L, COHORTSIZE)
       # NEW: count cycles received (per patient)
-      # ncycle <- rep(0L, COHORTSIZE)
+      ncycle <- rep(0L, COHORTSIZE)
       
       # update highest tried dose
       j_H <- max(j_H, j_S_curr)
@@ -253,21 +254,21 @@ IPCRM <- function(
         if(!any(active)) break
         
         # stop if all active patients already reached K cycles
-        # if(all(!active | (ncycle >= K))) {
-        #   idx_done <- which(active & ncycle >= K)
-        #   if(length(idx_done) > 0) {
-        #     for(ii in idx_done) {
-        #       p_global <- pid[ii]
-        #       if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
-        #     }
-        #     active[idx_done] <- FALSE
-        #   }
-        #   break
-        # }
+        if(all(!active | (ncycle >= K))) {
+          idx_done <- which(active & ncycle >= K)
+          if(length(idx_done) > 0) {
+            for(ii in idx_done) {
+              p_global <- pid[ii]
+              if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+            }
+            active[idx_done] <- FALSE
+          }
+          break
+        }
         
         # administer current cycle doses to active patients
-        # idx <- which(active & (ncycle < K))
-        idx <- which(active)
+        idx <- which(active & (ncycle < K))
+        # idx <- which(active)
         if(length(idx) == 0) break
         # cat("d_cycle:", d_cycle, "\n")
         # cat("PI[d_cycle]:", PI[d_cycle], "\n")
@@ -279,7 +280,7 @@ IPCRM <- function(
         cat("PI[d_cycle]:", PI[d_cycle], "\n")
         cat("y_cycle:", y_cycle, "\n")
         # update cycle counters
-        # ncycle[idx] <- ncycle[idx] + 1L
+        ncycle[idx] <- ncycle[idx] + 1L
         
         # append to accumulated observation-level data
         y_all <- c(y_all, y_cycle)
@@ -312,8 +313,8 @@ IPCRM <- function(
         cat('d_all', d_all, '\n')
         cat("intra posttox=", paste(round(res$posttox,3), collapse=" "), " j_MTD=", j_MTD, "\n")
         # decide next cycle dose for those still active and still have cycles left
-        # idx2 <- which(active & (ncycle < K))
-        idx2 <- which(active)
+        idx2 <- which(active & (ncycle < K))
+        # idx2 <- which(active)
         if(length(idx2) == 0) break
         
         next_dose <- pmin(curr_dose[idx2] + 1L, J)
@@ -325,14 +326,14 @@ IPCRM <- function(
         can_escalate <- (curr_dose[idx2] < J) & (curr_dose[idx2] <= j_MTD)
         
         # If cannot escalate => end treatment (NO "stay")
-        # if(any(!can_escalate)) {
-        #   idx_stop <- idx2[!can_escalate]
-        #   for(ii in idx_stop) {
-        #     p_global <- pid[ii]
-        #     if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
-        #   }
-        #   active[idx_stop] <- FALSE
-        # }
+        if(any(!can_escalate)) {
+           idx_stop <- idx2[!can_escalate]
+           for(ii in idx_stop) {
+             p_global <- pid[ii]
+             if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
+           }
+           active[idx_stop] <- FALSE
+        }
         
         # If can escalate => move up by 1 for next cycle
         if(any(can_escalate)) {
@@ -343,14 +344,14 @@ IPCRM <- function(
         
         
         # after escalation attempt, immediately stop anyone who just reached K cycles
-        # idx_done2 <- which(active & (ncycle >= K))
-        # if(length(idx_done2) > 0) {
-        #   for(ii in idx_done2) {
-        #     p_global <- pid[ii]
-        #     if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
-        #   }
-        #   active[idx_done2] <- FALSE
-        # }
+        idx_done2 <- which(active & (ncycle >= K))
+        if(length(idx_done2) > 0) {
+          for(ii in idx_done2) {
+            p_global <- pid[ii]
+            if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+          }
+          active[idx_done2] <- FALSE
+        }
         
         
         cat('can escalation', can_escalate, '\n')
@@ -360,10 +361,10 @@ IPCRM <- function(
       
       
       # ---- Early termination rule (trial-level): Pr(p1 > TARGET | data) > c_stop ----
-      overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      # overtox = overtox_prob(y_all,d_all,p, TARGET,lambda = 1, sigma = 0.5, mu = 3 )
-      if(isTRUE(overtox$stop == 1)) {
-      #if(overtox > c_stop){
+      # overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
+      overtox = overtox_prob(y_all,d_all,p, TARGET,lambda = 1, sigma = 0.5, mu = 3 )
+      #if(isTRUE(overtox$stop == 1)) {
+      if(overtox > c_stop){
         stop_trial <- TRUE
         break
       }
@@ -382,7 +383,7 @@ IPCRM <- function(
     } else {
       res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
       # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
-      final_MTD = select_dose(res$posttox, d_all)
+      final_MTD = select_dose(res$posttox, d_all, TARGET)
       # final_MTD <- res$MTD
       dose.select[final_MTD] <- dose.select[final_MTD] + 1
       cat("intra posttox=", paste(round(res$posttox,3), collapse=" "), " final_MTD=", final_MTD, "\n")
@@ -442,21 +443,102 @@ ske1 = c(0.02, 0.12, 0.3, 0.5, 0.65)
 #backsolve for d_j
 dose = backsol(ske1, mu_beta0 = 3, mu_beta1 = 1)
 # sce1 = c(0.02, 0.05, 0.08, 0.1, 0.3)
-sce1 = c(0.05, 0.15, 0.3, 0.5, 0.8)
+sce3 = c(0.05, 0.15, 0.3, 0.5, 0.8)
 # sce1 = c(0.02,0.05,0.1,0.3,0.5)
 cat('seed', job_i, '\n')
 res <- IPCRM(
-              sce1,
+              sce3,
               TARGET = 0.3,
               dose,
               COHORTSIZE = 3,
               ncohort = 3,
               ntrial = 1,
-              K = 5,
+              K = 3,
               c_stop = 0.96,
               seed = job_i
 )
-foldername = 'IPCRM'
+foldername = 'IPCRM/res3'
+if (!dir.exists(paste0('results/',foldername))) {
+  dir.create(paste0('results/',foldername), recursive = TRUE)}
+saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
+
+sce1 = c(0.3, 0.5, 0.7, 0.8, 0.9)
+res <- IPCRM(
+  sce1,
+  TARGET = 0.3,
+  dose,
+  COHORTSIZE = 3,
+  ncohort = 3,
+  ntrial = 1,
+  K = 3,
+  c_stop = 0.96,
+  seed = job_i
+)
+foldername = 'IPCRM/res1'
+if (!dir.exists(paste0('results/',foldername))) {
+  dir.create(paste0('results/',foldername), recursive = TRUE)}
+saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
+sce2 = c(0.1, 0.3, 0.55, 0.65, 0.75)
+res <- IPCRM(
+  sce2,
+  TARGET = 0.3,
+  dose,
+  COHORTSIZE = 3,
+  ncohort = 3,
+  ntrial = 1,
+  K = 3,
+  c_stop = 0.96,
+  seed = job_i
+)
+foldername = 'IPCRM/res2'
+if (!dir.exists(paste0('results/',foldername))) {
+  dir.create(paste0('results/',foldername), recursive = TRUE)}
+saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
+sce4 = c(0.02, 0.05, 0.1, 0.3, 0.5)
+res <- IPCRM(
+  sce4,
+  TARGET = 0.3,
+  dose,
+  COHORTSIZE = 3,
+  ncohort = 3,
+  ntrial = 1,
+  K = 3,
+  c_stop = 0.96,
+  seed = job_i
+)
+foldername = 'IPCRM/res4'
+if (!dir.exists(paste0('results/',foldername))) {
+  dir.create(paste0('results/',foldername), recursive = TRUE)}
+saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
+sce5 = c(0.02, 0.05, 0.08, 0.1, 0.3)
+res <- IPCRM(
+  sce5,
+  TARGET = 0.3,
+  dose,
+  COHORTSIZE = 3,
+  ncohort = 3,
+  ntrial = 1,
+  K = 3,
+  c_stop = 0.96,
+  seed = job_i
+)
+foldername = 'IPCRM/res5'
+if (!dir.exists(paste0('results/',foldername))) {
+  dir.create(paste0('results/',foldername), recursive = TRUE)}
+saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
+sce6 = c(0.6, 0.7, 0.75, 0.8, 0.85)
+res <- IPCRM(
+  sce6,
+  TARGET = 0.3,
+  dose,
+  COHORTSIZE = 3,
+  ncohort = 3,
+  ntrial = 1,
+  K = 3,
+  c_stop = 0.96,
+  seed = job_i
+)
+foldername = 'IPCRM/res6'
 if (!dir.exists(paste0('results/',foldername))) {
   dir.create(paste0('results/',foldername), recursive = TRUE)}
 saveRDS(res, paste0('results/',foldername,'/trial-',job_i))
