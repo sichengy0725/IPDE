@@ -27,7 +27,7 @@ draws_JAGS <- function(y, d, p, e,
   
   smp <- coda.samples(
     model          = jags,
-    variable.names = c("beta0", "beta1", "gamma"),
+    variable.names = c("beta0", "beta1", "gamma0", "gamma"),
     n.iter         = n.iter,
     thin           = thin,
     progress.bar   = "none"
@@ -35,10 +35,12 @@ draws_JAGS <- function(y, d, p, e,
   draws <- as.matrix(smp)  # works for mcmc.list; stacks chains
   beta0 <- draws[, "beta0"]
   beta1 <- draws[, "beta1"]
-  gamma <- draws[, 3:ncol(draws)]
+  gamma0 <- draws[, "gamma0"]
+  gamma <- draws[, 3:(ncol(draws)-1)]
   list(
     beta0 = beta0,
     beta1 = beta1,
+    gamma0 = gamma0,
     gamma = gamma
   )
 }
@@ -64,7 +66,7 @@ overtox <- function(draws,T.TARGET,T.cutoff,p){
 futility <- function(draws, E.TARGET, E.cutoff, p){
   prob_futility = rep(0,length(p))
   for(j in 1:length(p)){
-    pi1_draws <- pnorm(draws$gamma[,j])
+    pi1_draws <- pnorm(draws$gamma[,j] + draws$gamma0)
     prob_futility[j] <- mean(pi1_draws < E.TARGET)
   }
   stop <- as.integer(prob_futility > E.cutoff)
@@ -77,7 +79,7 @@ get.utility <- function(draws, uti, p){
     mean(plogis(draws$beta0 + draws$beta1 * p[j]))
   }, numeric(1))
   posteff <- vapply(seq_len(J), function(j) {
-    mean(pnorm(draws$gamma[,j]))
+    mean(pnorm(draws$gamma[,j] + draws$gamma0))
   }, numeric(1))
   postnotox <- 1 - posttox
   postnoeff <- 1 - posteff

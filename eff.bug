@@ -3,14 +3,16 @@ model {
  for(i in 1:N) {
     y_bin[i] ~ dbern(p[i])
     logit(p[i]) <- beta0 + beta1 * d_j[i]	
-    eta[i] <- gamma[dose_index[i]]
+    eta[i] <- gamma[dose_index[i]] + gamma0
     q[i] <- phi(eta[i])
     e_bin[i] ~ dbern(q[i])  
  }
  beta1 ~ dexp(1)
  beta0 ~ dnorm(3, 4)
+ gamma0 ~ dnorm(0,4)
  gamma[1] ~ dnorm(-0.5, 4)
+ tau ~ dunif(0,2)
  for(j in 2:D){
-  gamma[j] ~ dnorm(gamma[j-1], 4)
+  gamma[j] ~ dnorm(gamma[j-1], 1/pow(tau,2))
  }	
 }
