@@ -90,7 +90,10 @@ select_dose <- function(post_prob, dose_trt,TARGET) {
   min(cand)
 }
 
-estimate_MTD_JAGS <- function(y, d, p,
+# ------------------------------------------------------------
+# Posterior MTD estimator (handles all 4 model types)
+# ------------------------------------------------------------
+estimate_MTD_JAGS <- function(y, d_level, p, Tcum, pid,
                               TARGET = 0.3,
                               cutoff = 0.96,
                               model_file = "logit.bug",
@@ -98,60 +101,105 @@ estimate_MTD_JAGS <- function(y, d, p,
                               n.adapt  = 1000,
                               n.burn   = 2000,
                               n.iter   = 5000,
-                              thin     = 2) {
+                              thin     = 2,
+                              # for CO / CO-RF posterior curve definition
+                              T_ref_for_curve = 0) {
+  
+  stopifnot(length(y) == length(d_level),
+            length(y) == length(Tcum),
+            length(y) == length(pid))
+  
+  Nobs <- length(y)
+  nPat <- if (Nobs == 0) 0L else max(pid)
+  
+  # d in the JAGS model is the numeric dose on model scale
+  # Here: use standardized/working dose values p[d_level]
+  d_numeric <- as.numeric(p[d_level])
+  T_numeric <- as.numeric(Tcum)
+  pid_int   <- as.integer(pid)
   
   data_jags <- list(
-    N     = length(y),
+    Nobs = Nobs,
+    nPat = nPat,
     y_bin = as.integer(y),
-    d_j     = as.numeric(p[d])  # p is effective dose vector (dtilde)
+    d = d_numeric,
+    T = T_numeric,
+    pid = pid_int
   )
   
   jags <- rjags::jags.model(
-    file    = model_file,
-    data    = data_jags,
+    file   = model_file,
+    data   = data_jags,
     n.chains = n.chains,
-    n.adapt = n.adapt,
-    quiet   = TRUE
+    n.adapt  = n.adapt,
+    quiet = TRUE
   )
   
   update(jags, n.burn, progress.bar = "none")
   
+  # Decide which parameters to monitor
+  is_CO   <- model_file %in% c("logit_CO.bug", "logit_CORF.bug")
+  is_RF   <- model_file %in% c("logit_RF.bug", "logit_CORF.bug")
+  
+  var.names <- c("beta0", "beta1")
+  if (is_CO) var.names <- c(var.names, "beta2")
+  if (is_RF) var.names <- c(var.names, "sigma") # u[] not needed for dose curve
+  
   smp <- coda.samples(
     model          = jags,
-    variable.names = c("beta0", "beta1"),
+    variable.names = var.names,
     n.iter         = n.iter,
     thin           = thin,
     progress.bar   = "none"
   )
   
-  draws <- as.matrix(smp)  # works for mcmc.list; stacks chains
+  draws <- as.matrix(smp)
   b0 <- draws[, "beta0"]
   b1 <- draws[, "beta1"]
+  b2 <- if (is_CO) draws[, "beta2"] else 0
   
   J <- length(p)
   
-   posttox <- vapply(seq_len(J), function(j) {
-    mean(plogis(b0 + b1 * p[j]))
+  # Dose-level posterior mean tox curve
+  # - logit/RF: logit^{-1}(b0 + b1*p[j])
+  # - CO/CO-RF: logit^{-1}(b0 + b1*p[j] + b2*T_ref_for_curve)
+  posttox <- vapply(seq_len(J), function(j) {
+    mean(plogis(b0 + b1 * p[j] + b2 * T_ref_for_curve))
   }, numeric(1))
-  # posttox <- vapply(seq_len(J), function(j) {
-  #    plogis(mean(b0) + mean(b1) * p[j])
-  #  }, numeric(1))
   
+  # MTD = closest to TARGET
   diff <- abs(posttox - TARGET)
-  dose.best <- which(diff == min(diff))[1]  # explicit tie rule
+  dose.best <- which(diff == min(diff))[1]
   
-  pi1_draws <- plogis(b0 + b1 * p[1])
+  # Early stop rule: Pr(p1 > TARGET | data) > cutoff
+  # Define p1 consistently with curve definition (T_ref_for_curve).
+  pi1_draws <- plogis(b0 + b1 * p[1] + b2 * T_ref_for_curve)
   prob_overtox <- mean(pi1_draws > TARGET)
-  stop <- as.integer(prob_overtox > cutoff)
+  stop_flag <- as.integer(prob_overtox > cutoff)
   
   list(
     MTD = dose.best,
     posttox = posttox,
     prob_overtox = prob_overtox,
-    stop = stop
+    stop = stop_flag
   )
 }
 
+# ------------------------------------------------------------
+# A simple final dose selector (example)
+# - You can replace with your own select_dose()
+# ------------------------------------------------------------
+select_dose_closest <- function(posttox, TARGET) {
+  which.min(abs(posttox - TARGET))[1]
+}
+
+
+# ------------------------------------------------------------
+# Main IPCRM simulator with:
+# - observation-level y_all, d_all, T_all, pid_all
+# - correct Tij: cumulative dose PRIOR to current cycle
+# - CO standardization applied to p (only for CO/CO-RF)
+# ------------------------------------------------------------
 IPCRM <- function(
     PI,
     TARGET = 0.3,
@@ -161,276 +209,256 @@ IPCRM <- function(
     ntrial,
     K = 3,
     c_stop = 0.96,
-    seed = 6
-){
+    seed = 6,
+    model_file = "logit.bug",
+    T_ref_for_curve = 0,
+    verbose = FALSE
+) {
   stopifnot(length(PI) == length(p))
   stopifnot(COHORTSIZE >= 1, ncohort >= 1, ntrial >= 1, K >= 1)
-  set.seed(seed)
   
+  set.seed(seed)
   J <- length(p)
   
-  # summaries across trials
-  dose.select <- numeric(J)   # final selected MTD counts
-  ntox        <- rep(0, J)    # patient-level tox counts at each dose (count pt once per dose)
-  ntrted      <- rep(0, J)    # patient-level treated counts at each dose (count pt once per dose)
-  nstop       <- 0            # early stopped trials
-  nobs     <- rep(0L, J)  # total dose-cycles at each dose across trials
-  ntox_obs <- rep(0L, J)  # total tox events (per cycle) at each dose across trials
+  is_CO <- model_file %in% c("logit_CO.bug", "logit_CORF.bug")
   
-  # for debugging: store patient sequences for EACH trial (can be large!)
+  # For CO / CO-RF: standardize dose values used in model
+  # NOTE: PI is indexed by dose level and stays on level scale
+  p_model <- p
+  if (is_CO) {
+    p_model <- (p_model - mean(p_model)) / (2 * sd(p_model))
+  }
+  
+  dose.select <- numeric(J)
+  nstop <- 0L
+  
+  # optional summaries (keep your originals if you like)
+  nobs     <- rep(0L, J)
+  ntox_obs <- rep(0L, J)
+  
   patient_seq_by_trial <- vector("list", ntrial)
   
-  t.start <- Sys.time()
-  
-  for(trial in 1:ntrial) {
+  for (trial in 1:ntrial) {
     
-    # running observation-level data across entire trial
-    y_all <- integer(0)  # toxicity outcomes per observation (cycle-dose)
-    d_all <- integer(0)  # dose level per observation
+    # observation-level data for JAGS
+    y_all   <- integer(0)
+    d_all   <- integer(0)  # dose level index 1..J
+    T_all   <- numeric(0)  # cumulative dose prior exposure (model scale)
+    pid_all <- integer(0)  # patient id for each observation
     
-    # patient-level debug list for this trial
     patient_seq <- list()
     patient_id  <- 0L
+    stop_trial  <- FALSE
     
-    # tracking for cohort starting dose rule
-    j_H <- 0L        # highest tried dose level so far
-    j_S_prev <- 1L   # previous cohort starting dose (initialize 1)
-    stop_trial <- FALSE
-    
-    # ---- Step 1: first cohort starts at dose 1 ----
+    # cohort starting dose rule trackers
+    j_H <- 0L
+    j_S_prev <- 1L
     j_S_curr <- 1L
     
-    for(coh in 1:ncohort) {
-      cat('coh', coh ,'start', '\n')
-      # ---- Step 3: update starting dose for new cohort (for coh > 1) ----
-      if(coh > 1) {
-        
-        
-        res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-        # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
+    for (coh in 1:ncohort) {
+      
+      if (coh > 1 && length(y_all) > 0) {
+        res <- estimate_MTD_JAGS(
+          y = y_all,
+          d_level = d_all,
+          p = p_model,
+          Tcum = T_all,
+          pid = pid_all,
+          TARGET = TARGET,
+          cutoff = c_stop,
+          model_file = model_file,
+          T_ref_for_curve = T_ref_for_curve
+        )
         j_MTD <- res$MTD
-        cat("posttox=", paste(round(res$posttox,3), collapse=" "), " j_MTD=", j_MTD, "\n")
-        if(j_MTD > j_H) {
+        
+        if (j_MTD > j_H) {
           j_S_curr <- min(j_H + 1L, J)
-        } else if(j_MTD < j_S_prev) {
+        } else if (j_MTD < j_S_prev) {
           j_S_curr <- max(j_S_prev - 1L, 1L)
         } else {
           j_S_curr <- j_MTD
         }
       }
-      cat('highest dose tried', j_H, '\n')
-      cat('previous dose', j_S_prev, '\n')
-      cat('curr dose', j_S_curr, '\n')
+      
       j_S_prev <- j_S_curr
-      
-      # ---- Enroll COHORTSIZE new patients; all start at j_S_curr ----
-      for(k in seq_len(COHORTSIZE)) {
-        patient_id <- patient_id + 1L
-        patient_seq[[patient_id]] <- list(
-          id     = patient_id,
-          cohort = coh,
-          doses  = integer(0),
-          tox    = integer(0),
-          stop   = NA_character_
-        )
-      }
-      pid <- (patient_id - COHORTSIZE + 1L):patient_id
-      
-      # Patient state variables within cohort
-      curr_dose <- rep(j_S_curr, COHORTSIZE)
-      active    <- rep(TRUE,  COHORTSIZE)  # FALSE once patient stops
-      # count of DIFFERENT doses taken so far (unique-dose count)
-      # ndoses_taken <- rep(1L, COHORTSIZE)
-      # NEW: count cycles received (per patient)
-      ncycle <- rep(0L, COHORTSIZE)
-      
-      # update highest tried dose
       j_H <- max(j_H, j_S_curr)
       
-      # ---- Step 2: intra-patient escalation by cycles ----
+      # enroll COHORTSIZE new patients
+      for (k in seq_len(COHORTSIZE)) {
+        patient_id <- patient_id + 1L
+        patient_seq[[patient_id]] <- list(
+          id = patient_id, cohort = coh,
+          doses = integer(0), tox = integer(0),
+          stop = NA_character_
+        )
+      }
+      pid_local <- (patient_id - COHORTSIZE + 1L):patient_id
+      
+      # within-cohort states
+      curr_dose <- rep(j_S_curr, COHORTSIZE)  # dose level
+      active    <- rep(TRUE,  COHORTSIZE)
+      ncycle    <- rep(0L, COHORTSIZE)
+      
+      # cumulative dose PRIOR exposure on model scale (numeric)
+      # This is what generates Tij
+      Tprior <- rep(0, COHORTSIZE)
+      
       repeat {
-        cat('Intra-patient coh', coh, '\n')
-        # stop if nobody is active
-        if(!any(active)) break
-        
-        # stop if all active patients already reached K cycles
-        if(all(!active | (ncycle >= K))) {
-          idx_done <- which(active & ncycle >= K)
-          if(length(idx_done) > 0) {
-            for(ii in idx_done) {
-              p_global <- pid[ii]
-              if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
-            }
-            active[idx_done] <- FALSE
-          }
-          break
-        }
-        
-        # administer current cycle doses to active patients
         idx <- which(active & (ncycle < K))
-        # idx <- which(active)
-        if(length(idx) == 0) break
-        # cat("d_cycle:", d_cycle, "\n")
-        # cat("PI[d_cycle]:", PI[d_cycle], "\n")
-        # cat("y_cycle:", y_cycle, "\n")
-        d_cycle <- curr_dose[idx]
+        if (length(idx) == 0) break
+        
+        d_cycle <- curr_dose[idx]                 # dose level indices
+        dose_amt <- p_model[d_cycle]              # model scale numeric dose
+        
+        # ---- FIXED Tij ----
+        # Tij for this observation is cumulative dose PRIOR to current cycle:
+        T_cycle <- Tprior[idx]
+        
+        # toxicity outcome generation uses PI by dose level (not standardized)
         y_cycle <- rbinom(length(idx), 1, PI[d_cycle])
         
-        cat("d_cycle:", d_cycle, "\n")
-        cat("PI[d_cycle]:", PI[d_cycle], "\n")
-        cat("y_cycle:", y_cycle, "\n")
-        # update cycle counters
-        ncycle[idx] <- ncycle[idx] + 1L
+        # append observation-level data
+        y_all   <- c(y_all, y_cycle)
+        d_all   <- c(d_all, d_cycle)
+        T_all   <- c(T_all, T_cycle)
+        pid_all <- c(pid_all, pid_local[idx])
         
-        # append to accumulated observation-level data
-        y_all <- c(y_all, y_cycle)
-        d_all <- c(d_all, d_cycle)
-        
-        # record patient-level sequences + toxicity stop
-        for(m in seq_along(idx)) {
-          p_global <- pid[idx[m]]
-          patient_seq[[p_global]]$doses <- c(patient_seq[[p_global]]$doses, d_cycle[m])
-          patient_seq[[p_global]]$tox   <- c(patient_seq[[p_global]]$tox,   y_cycle[m])
-          
-          if(y_cycle[m] == 1L && is.na(patient_seq[[p_global]]$stop)) {
-            patient_seq[[p_global]]$stop <- "toxicity"
+        # update patient sequence debug
+        for (m in seq_along(idx)) {
+          pg <- pid_local[idx[m]]
+          patient_seq[[pg]]$doses <- c(patient_seq[[pg]]$doses, d_cycle[m])
+          patient_seq[[pg]]$tox   <- c(patient_seq[[pg]]$tox,   y_cycle[m])
+          if (y_cycle[m] == 1L && is.na(patient_seq[[pg]]$stop)) {
+            patient_seq[[pg]]$stop <- "toxicity"
           }
         }
         
-        # toxicity => stop further treatment
-        idx_tox <- idx[y_cycle == 1L]
-        if(length(idx_tox) > 0) active[idx_tox] <- FALSE
+        # update counters AFTER recording
+        ncycle[idx] <- ncycle[idx] + 1L
+        Tprior[idx] <- Tprior[idx] + dose_amt
         
-        # update highest tried dose
+        # stop those with toxicity
+        idx_tox <- idx[y_cycle == 1L]
+        if (length(idx_tox) > 0) active[idx_tox] <- FALSE
+        
+        # update highest dose tried
         j_H <- max(j_H, max(d_cycle))
         
-        # update estimated MTD using all data
+        # if no active patients left, stop
+        if (!any(active)) break
         
-        res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-        # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
+        # update estimated MTD using all accumulated data
+        res <- estimate_MTD_JAGS(
+          y = y_all,
+          d_level = d_all,
+          p = p_model,
+          Tcum = T_all,
+          pid = pid_all,
+          TARGET = TARGET,
+          cutoff = c_stop,
+          model_file = model_file,
+          T_ref_for_curve = T_ref_for_curve
+        )
         j_MTD <- res$MTD
-        cat('y_all', y_all, '\n')
-        cat('d_all', d_all, '\n')
-        cat("intra posttox=", paste(round(res$posttox,3), collapse=" "), " j_MTD=", j_MTD, "\n")
-        # decide next cycle dose for those still active and still have cycles left
+        
+        # decide next cycle for active patients
         idx2 <- which(active & (ncycle < K))
-        # idx2 <- which(active)
-        if(length(idx2) == 0) break
+        if (length(idx2) == 0) break
         
-        next_dose <- pmin(curr_dose[idx2] + 1L, J)
-
-        
-        # Escalation availability rule:
-        # - must have a higher dose available (curr < J)
-        # - and escalation must be allowed by the model (next_dose <= j_MTD)
+        # escalation rule (your style): no "stay"; escalate only if allowed
         can_escalate <- (curr_dose[idx2] < J) & (curr_dose[idx2] <= j_MTD)
         
-        # If cannot escalate => end treatment (NO "stay")
-        if(any(!can_escalate)) {
-           idx_stop <- idx2[!can_escalate]
-           for(ii in idx_stop) {
-             p_global <- pid[ii]
-             if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "no_escalation"
-           }
-           active[idx_stop] <- FALSE
+        # stop if cannot escalate
+        if (any(!can_escalate)) {
+          idx_stop <- idx2[!can_escalate]
+          for (ii in idx_stop) {
+            pg <- pid_local[ii]
+            if (is.na(patient_seq[[pg]]$stop)) patient_seq[[pg]]$stop <- "no_escalation"
+          }
+          active[idx_stop] <- FALSE
         }
         
-        # If can escalate => move up by 1 for next cycle
-        if(any(can_escalate)) {
+        # escalate by 1 if allowed
+        if (any(can_escalate)) {
           idx_up <- idx2[can_escalate]
-          curr_dose[idx_up] <- curr_dose[idx_up] + 1L
+          curr_dose[idx_up] <- pmin(curr_dose[idx_up] + 1L, J)
           j_H <- max(j_H, max(curr_dose[idx_up]))
         }
         
-        
-        # after escalation attempt, immediately stop anyone who just reached K cycles
-        idx_done2 <- which(active & (ncycle >= K))
-        if(length(idx_done2) > 0) {
-          for(ii in idx_done2) {
-            p_global <- pid[ii]
-            if(is.na(patient_seq[[p_global]]$stop)) patient_seq[[p_global]]$stop <- "maxK"
+        # stop if reached max cycles
+        idx_done <- which(active & (ncycle >= K))
+        if (length(idx_done) > 0) {
+          for (ii in idx_done) {
+            pg <- pid_local[ii]
+            if (is.na(patient_seq[[pg]]$stop)) patient_seq[[pg]]$stop <- "maxK"
           }
-          active[idx_done2] <- FALSE
+          active[idx_done] <- FALSE
         }
-        
-        
-        cat('can escalation', can_escalate, '\n')
-        cat('active', active, '\n')
-        
+      } # repeat within cohort
+      
+      # early termination (trial-level)
+      if (length(y_all) > 0) {
+        overtox <- estimate_MTD_JAGS(
+          y = y_all,
+          d_level = d_all,
+          p = p_model,
+          Tcum = T_all,
+          pid = pid_all,
+          TARGET = TARGET,
+          cutoff = c_stop,
+          model_file = model_file,
+          T_ref_for_curve = T_ref_for_curve
+        )
+        if (isTRUE(overtox$stop == 1L)) {
+          stop_trial <- TRUE
+          break
+        }
       }
-      
-      
-      # ---- Early termination rule (trial-level): Pr(p1 > TARGET | data) > c_stop ----
-      # overtox <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      overtox = overtox_prob(y_all,d_all,p, TARGET,lambda = 1, sigma = 0.5, mu = 3 )
-      #if(isTRUE(overtox$stop == 1)) {
-      if(overtox > c_stop){
-        stop_trial <- TRUE
-        break
-      }
-      
     } # end cohorts
     
-    # finalize stop labels for any remaining NA (e.g., still active when trial ended)
-    for(i in seq_along(patient_seq)) {
-      if(is.na(patient_seq[[i]]$stop)) patient_seq[[i]]$stop <- "trial_end"
+    # label remaining NA stops
+    for (i in seq_along(patient_seq)) {
+      if (is.na(patient_seq[[i]]$stop)) patient_seq[[i]]$stop <- "trial_end"
     }
-    
     patient_seq_by_trial[[trial]] <- patient_seq
     
-    if(stop_trial) {
-      nstop <- nstop + 1
-    } else {
-      res <- estimate_MTD_JAGS(y_all, d_all, p, TARGET, c_stop)
-      # res = estimate_MTD(y_all,d_all,dose, TARGET, lambda = 1, sigma = 0.5, mu = 3)
-      final_MTD = select_dose(res$posttox, d_all, TARGET)
-      # final_MTD <- res$MTD
+    if (stop_trial) {
+      nstop <- nstop + 1L
+    } else if (length(y_all) > 0) {
+      res <- estimate_MTD_JAGS(
+        y = y_all,
+        d_level = d_all,
+        p = p_model,
+        Tcum = T_all,
+        pid = pid_all,
+        TARGET = TARGET,
+        cutoff = c_stop,
+        model_file = model_file,
+        T_ref_for_curve = T_ref_for_curve
+      )
+      
+      final_MTD <- select_dose_closest(res$posttox, TARGET)
       dose.select[final_MTD] <- dose.select[final_MTD] + 1
-      cat("intra posttox=", paste(round(res$posttox,3), collapse=" "), " final_MTD=", final_MTD, "\n")
-      
-      
     }
     
-    # -------------------------------
-    # PATIENT-LEVEL summary updating
-    # -------------------------------
-    for(pid_i in seq_along(patient_seq)) {
-      doses_i <- patient_seq[[pid_i]]$doses
-      tox_i   <- patient_seq[[pid_i]]$tox
-      if(length(doses_i) == 0) next
-
-      # patient treated at these dose levels (count once per dose)
-      dset <- unique(doses_i)
-      ntrted[dset] <- ntrted[dset] + 1
-
-      # patient had >=1 toxicity while at dose j (count once per dose)
-      tox_doses <- unique(doses_i[tox_i == 1L])
-      if(length(tox_doses) > 0) ntox[tox_doses] <- ntox[tox_doses] + 1
-    }
-    for(j in seq_len(J)) {
+    # cycle-level summaries
+    for (j in seq_len(J)) {
       nobs[j]     <- nobs[j]     + sum(d_all == j)
       ntox_obs[j] <- ntox_obs[j] + sum(y_all[d_all == j] == 1L)
     }
-    
   } # end trials
   
-  t.end <- Sys.time()
-  
-  cat("Selection probability (%): ", round(dose.select / ntrial * 100, 2), "\n")
-  cat("Avg # pts treated at dose: ", round(nobs / ntrial, 3), "\n")
-  cat("Avg # pts tox at dose:     ", round(ntox / ntrial, 3), "\n")
-  cat("Early stop rate (%):       ", round(nstop / ntrial * 100, 2), "\n")
-  print(t.end - t.start)
-  
-  invisible(list(
-    sel_pct   = dose.select / ntrial,
-    avg_trted = nobs / ntrial,
-    avg_cycle = ntrted / ntrial,
-    avg_tox   = ntox / ntrial,
-    stop_pct  = nstop / ntrial,
-    patient_seq_by_trial = patient_seq_by_trial
-  ))
+  list(
+    sel_pct = dose.select / ntrial,
+    stop_pct = nstop / ntrial,
+    avg_cycles_at_dose = nobs / ntrial,
+    avg_tox_events_at_dose = ntox_obs / ntrial,
+    patient_seq_by_trial = patient_seq_by_trial,
+    model_file = model_file,
+    T_ref_for_curve = T_ref_for_curve
+  )
 }
+
 
 #mu_beta - mean of prior 
 backsol <- function(ske, mu_beta0, mu_beta1){
@@ -442,6 +470,7 @@ job_i <- as.integer(args[1])
 ske1 = c(0.02, 0.12, 0.3, 0.5, 0.65)
 #backsolve for d_j
 dose = backsol(ske1, mu_beta0 = 3, mu_beta1 = 1)
+model_file = 'logit_CO.bug'
 # sce1 = c(0.02, 0.05, 0.08, 0.1, 0.3)
 sce3 = c(0.05, 0.15, 0.3, 0.5, 0.8)
 # sce1 = c(0.02,0.05,0.1,0.3,0.5)
@@ -455,7 +484,8 @@ res <- IPCRM(
               ntrial = 1,
               K = 3,
               c_stop = 0.96,
-              seed = job_i
+              seed = job_i,
+              model_file = model_file
 )
 foldername = 'IPCRM/res3'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -472,7 +502,8 @@ res <- IPCRM(
   ntrial = 1,
   K = 3,
   c_stop = 0.96,
-  seed = job_i
+  seed = job_i,
+  model_file = model_file
 )
 foldername = 'IPCRM/res1'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -488,7 +519,8 @@ res <- IPCRM(
   ntrial = 1,
   K = 3,
   c_stop = 0.96,
-  seed = job_i
+  seed = job_i,
+  model_file = model_file
 )
 foldername = 'IPCRM/res2'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -504,7 +536,8 @@ res <- IPCRM(
   ntrial = 1,
   K = 3,
   c_stop = 0.96,
-  seed = job_i
+  seed = job_i,
+  model_file = model_file
 )
 foldername = 'IPCRM/res4'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -520,7 +553,8 @@ res <- IPCRM(
   ntrial = 1,
   K = 3,
   c_stop = 0.96,
-  seed = job_i
+  seed = job_i,
+  model_file = model_file
 )
 foldername = 'IPCRM/res5'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -536,7 +570,8 @@ res <- IPCRM(
   ntrial = 1,
   K = 3,
   c_stop = 0.96,
-  seed = job_i
+  seed = job_i,
+  model_file = model_file
 )
 foldername = 'IPCRM/res6'
 if (!dir.exists(paste0('results/',foldername))) {

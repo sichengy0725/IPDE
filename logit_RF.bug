@@ -1,0 +1,12 @@
+model {
+  for (k in 1:nPat) {
+    u[k] ~ dnorm(0, 1/pow(sigma,2))
+  }
+  for (i in 1:Nobs) {
+    y_bin[i] ~ dbern(pi[i])
+    logit(pi[i]) <- beta0 + beta1 * d[i] + u[pid[i]]
+  }
+  beta1 ~ dexp(1)
+  beta0 ~ dnorm(3, 4)  # SD = 0.5
+  sigma ~ dt(0, 1/pow(1.25,2), 1) T(0,)
+}

@@ -1,0 +1,13 @@
+model {
+  for (k in 1:nPat) {
+    u[k] ~ dnorm(0, 1/pow(sigma,2))
+  }
+  for (i in 1:Nobs) {
+    y_bin[i] ~ dbern(pi[i])
+    logit(pi[i]) <- beta0 + beta1 * d[i] + beta2 * T[i] + u[pid[i]]
+  }
+  beta0 ~ dt(-4, 1/pow(0.5,2), 1)   # Cauchy(-4, 0.5)
+  beta1 ~ dgamma(5.83, 1.21)
+  beta2 ~ dexp(1)
+  sigma ~ dt(0, 1/pow(1.25,2), 1) T(0,)
+}

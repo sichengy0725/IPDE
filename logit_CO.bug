@@ -1,0 +1,10 @@
+
+model {
+ for(i in 1:N) {
+    y_bin[i] ~ dbern(p[i])
+    logit(p[i]) <- beta0 + beta1 * d[i]	+ beta2 * T[i]
+ }
+ beta0 ~ dt(-4, 1/pow(0.5,2), 1)
+ beta1 ~ dgamma(5.83, 1.21)
+ beta2 ~ exp(1)	
+}
