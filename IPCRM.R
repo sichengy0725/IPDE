@@ -210,6 +210,7 @@ IPCRM <- function(
     K = 3,
     c_stop = 0.96,
     seed = 6,
+    gamma = 0.2, 
     model_file = "logit.bug",
     T_ref_for_curve = 0,
     verbose = FALSE
@@ -298,6 +299,8 @@ IPCRM <- function(
       curr_dose <- rep(j_S_curr, COHORTSIZE)  # dose level
       active    <- rep(TRUE,  COHORTSIZE)
       ncycle    <- rep(0L, COHORTSIZE)
+      # Carryover state: previous cycle's *effective* toxicity probability c_{k-1}
+      c_prev <- rep(NA_real_, COHORTSIZE)
       
       # cumulative dose PRIOR exposure on model scale (numeric)
       # This is what generates Tij
@@ -307,15 +310,30 @@ IPCRM <- function(
         idx <- which(active & (ncycle < K))
         if (length(idx) == 0) break
         
-        d_cycle <- curr_dose[idx]                 # dose level indices
-        dose_amt <- p_model[d_cycle]              # model scale numeric dose
+        d_cycle  <- curr_dose[idx]          # dose level indices
+        dose_amt <- p_model[d_cycle]        # model scale numeric dose
         
         # ---- FIXED Tij ----
         # Tij for this observation is cumulative dose PRIOR to current cycle:
         T_cycle <- Tprior[idx]
         
-        # toxicity outcome generation uses PI by dose level (not standardized)
-        y_cycle <- rbinom(length(idx), 1, PI[d_cycle])
+        # --------------------------------------------
+        # Carryover toxicity data generation (IPCRM)
+        # c_k = min( PI[d_k] + gamma * c_{k-1}, 1 )
+        # c_1 = PI[d_1]
+        # --------------------------------------------
+        pi_raw <- PI[d_cycle]
+        
+        p_eff <- ifelse(
+          is.na(c_prev[idx]),
+          pi_raw,
+          pmin(pi_raw + gamma * c_prev[idx], 1)
+        )
+        
+        y_cycle <- rbinom(length(idx), 1, p_eff)
+        
+        # update carryover state AFTER generating this cycle outcome
+        c_prev[idx] <- p_eff
         
         # append observation-level data
         y_all   <- c(y_all, y_cycle)
@@ -366,7 +384,7 @@ IPCRM <- function(
         if (length(idx2) == 0) break
         
         # escalation rule (your style): no "stay"; escalate only if allowed
-        can_escalate <- (curr_dose[idx2] < J) & (curr_dose[idx2] <= j_MTD)
+        can_escalate <- (curr_dose[idx2] < J) & (curr_dose[idx2] < j_MTD)
         
         # stop if cannot escalate
         if (any(!can_escalate)) {
@@ -395,27 +413,8 @@ IPCRM <- function(
           active[idx_done] <- FALSE
         }
       } # repeat within cohort
-      
-      # early termination (trial-level)
-      if (length(y_all) > 0) {
-        overtox <- estimate_MTD_JAGS(
-          y = y_all,
-          d_level = d_all,
-          p = p_model,
-          Tcum = T_all,
-          pid = pid_all,
-          TARGET = TARGET,
-          cutoff = c_stop,
-          model_file = model_file,
-          T_ref_for_curve = T_ref_for_curve
-        )
-        if (isTRUE(overtox$stop == 1L)) {
-          stop_trial <- TRUE
-          break
-        }
-      }
-    } # end cohorts
-    
+      # end cohorts
+    }
     # label remaining NA stops
     for (i in seq_along(patient_seq)) {
       if (is.na(patient_seq[[i]]$stop)) patient_seq[[i]]$stop <- "trial_end"
@@ -471,6 +470,7 @@ ske1 = c(0.02, 0.12, 0.3, 0.5, 0.65)
 #backsolve for d_j
 dose = backsol(ske1, mu_beta0 = 3, mu_beta1 = 1)
 model_file = 'logit_CO.bug'
+gamma = 0.2
 # sce1 = c(0.02, 0.05, 0.08, 0.1, 0.3)
 sce3 = c(0.05, 0.15, 0.3, 0.5, 0.8)
 # sce1 = c(0.02,0.05,0.1,0.3,0.5)
@@ -485,7 +485,8 @@ res <- IPCRM(
               K = 3,
               c_stop = 0.96,
               seed = job_i,
-              model_file = model_file
+              model_file = model_file,
+              gamma = gamma
 )
 foldername = 'IPCRM/res3'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -503,7 +504,8 @@ res <- IPCRM(
   K = 3,
   c_stop = 0.96,
   seed = job_i,
-  model_file = model_file
+  model_file = model_file,
+  gamma = gamma
 )
 foldername = 'IPCRM/res1'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -520,7 +522,8 @@ res <- IPCRM(
   K = 3,
   c_stop = 0.96,
   seed = job_i,
-  model_file = model_file
+  model_file = model_file,
+  gamma = gamma
 )
 foldername = 'IPCRM/res2'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -537,7 +540,8 @@ res <- IPCRM(
   K = 3,
   c_stop = 0.96,
   seed = job_i,
-  model_file = model_file
+  model_file = model_file,
+  gamma = gamma
 )
 foldername = 'IPCRM/res4'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -554,7 +558,8 @@ res <- IPCRM(
   K = 3,
   c_stop = 0.96,
   seed = job_i,
-  model_file = model_file
+  model_file = model_file,
+  gamma = gamma
 )
 foldername = 'IPCRM/res5'
 if (!dir.exists(paste0('results/',foldername))) {
@@ -571,9 +576,11 @@ res <- IPCRM(
   K = 3,
   c_stop = 0.96,
   seed = job_i,
-  model_file = model_file
+  model_file = model_file,
+  gamma = gamma
 )
 foldername = 'IPCRM/res6'
 if (!dir.exists(paste0('results/',foldername))) {
-  dir.create(paste0('results/',foldername), recursive = TRUE)}
+  dir.create(paste0('results/',foldername), recursive = TRUE)
+}
 saveRDS(res, paste0('results/',foldername,'/trial-',job_i))

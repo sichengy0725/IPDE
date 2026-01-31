@@ -1,6 +1,6 @@
 
 model {
- for(i in 1:N) {
+ for(i in 1:Nobs) {
     y_bin[i] ~ dbern(p[i])
     logit(p[i]) <- beta0 + beta1 * d[i]	+ beta2 * T[i]
  }
