@@ -211,6 +211,7 @@ IPCRM <- function(
     c_stop = 0.96,
     seed = 6,
     gamma = 0.2, 
+    rho = 0.2,
     model_file = "logit.bug",
     T_ref_for_curve = 0,
     verbose = FALSE
@@ -306,6 +307,19 @@ IPCRM <- function(
       # This is what generates Tij
       Tprior <- rep(0, COHORTSIZE)
       
+      # ---- Intra-patient correlation across cycles via Gaussian copula (AR(1)) ----
+      # Correlation matrix for cycles 1..K: Corr(Z_k, Z_l) = rho^{|k-l|}
+      Sigma <- outer(1:K, 1:K, function(a,b) rho^abs(a-b))
+      
+      # One correlated latent vector per patient (3 cycles)
+      # Requires mvtnorm
+      # install.packages("mvtnorm")
+      Zmat <- mvtnorm::rmvnorm(n = COHORTSIZE, mean = rep(0, K), sigma = Sigma)
+      Umat <- pnorm(Zmat)  # correlated uniforms in (0,1)
+      
+      # ---- Carryover state: previous effective toxicity probability c_{k-1} ----
+      c_prev <- rep(NA_real_, COHORTSIZE)
+      
       repeat {
         idx <- which(active & (ncycle < K))
         if (length(idx) == 0) break
@@ -330,10 +344,15 @@ IPCRM <- function(
           pmin(pi_raw + gamma * c_prev[idx], 1)
         )
         
-        y_cycle <- rbinom(length(idx), 1, p_eff)
+        # y_cycle <- rbinom(length(idx), 1, p_eff)
+        k_now <- ncycle[idx] + 1L  # current cycle index (1..K)
+        u_now <- Umat[cbind(idx, k_now)]
         
-        # update carryover state AFTER generating this cycle outcome
+        y_cycle <- as.integer(u_now < p_eff)
+        
+        # update carryover state AFTER generating this cycle
         c_prev[idx] <- p_eff
+        
         
         # append observation-level data
         y_all   <- c(y_all, y_cycle)
